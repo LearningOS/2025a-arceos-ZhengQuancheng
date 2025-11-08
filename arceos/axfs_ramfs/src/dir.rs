@@ -67,6 +67,20 @@ impl DirNode {
         children.remove(name);
         Ok(())
     }
+
+    /// Renames a node from `src_name` to `dst_name` in this directory.
+    pub fn rename_node(&self, src_name: &str, dst_name: &str) -> VfsResult {
+        let mut children = self.children.write();
+        if !children.contains_key(src_name) {
+            return Err(VfsError::NotFound);
+        }
+        if children.contains_key(dst_name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let node = children.remove(src_name).unwrap();
+        children.insert(dst_name.into(), node);
+        Ok(())
+    }
 }
 
 impl VfsNodeOps for DirNode {
@@ -163,6 +177,37 @@ impl VfsNodeOps for DirNode {
         } else {
             self.remove_node(name)
         }
+    }
+
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        log::debug!("rename at ramfs, src_path: {}, dst_path: {}", src_path, dst_path);
+        // 只考虑同目录下文件重命名, 不考文件虑跨目录移动
+        let (src_name, src_rest) = split_path(src_path);
+        // 处理源文件目录
+        if let Some(src_rest) = src_rest {
+            match src_name {
+                "" | "." => return self.rename(src_rest, dst_path),
+                ".." => {
+                    return self
+                        .parent()
+                        .ok_or(VfsError::NotFound)?
+                        .rename(src_rest, dst_path)
+                }
+                _ => {
+                    let subdir = self
+                        .children
+                        .read()
+                        .get(src_name)
+                        .ok_or(VfsError::NotFound)?
+                        .clone();
+                    return subdir.rename(src_rest, dst_path);
+                }
+            }
+        }
+        // 提取文件路径中的文件名部分
+        let dst_name = dst_path.rsplit('/').next().unwrap_or("");
+        // 文件重命名
+        self.rename_node(src_name, dst_name)
     }
 
     axfs_vfs::impl_vfs_dir_default! {}
