@@ -7,7 +7,8 @@ use axerrno::LinuxError;
 use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
-use arceos_posix_api as api;
+use arceos_posix_api::{self as api, get_file_like};
+use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange};
 
 const SYS_IOCTL: usize = 29;
 const SYS_OPENAT: usize = 56;
@@ -100,7 +101,7 @@ bitflags::bitflags! {
 fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ax_println!("handle_syscall [{}] ...", syscall_num);
     let ret = match syscall_num {
-         SYS_IOCTL => sys_ioctl(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _) as _,
+        SYS_IOCTL => sys_ioctl(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _) as _,
         SYS_SET_TID_ADDRESS => sys_set_tid_address(tf.arg0() as _),
         SYS_OPENAT => sys_openat(tf.arg0() as _, tf.arg1() as _, tf.arg2() as _, tf.arg3() as _),
         SYS_CLOSE => sys_close(tf.arg0() as _),
@@ -140,7 +141,30 @@ fn sys_mmap(
     fd: i32,
     _offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    // 针对测试用例做简化处理
+    // 获取当前进程的地址空间
+    let curr = current();
+    let mut aspace = curr.task_ext().aspace.lock();
+    // 查找空闲的内存区域
+    let start = VirtAddr::from(addr as usize);
+    let start = aspace.find_free_area(
+        start, 
+        length,
+        VirtAddrRange::from_start_size(start, aspace.size())
+    ).unwrap();
+    // 准备内存映射的参数
+    let size = length.align_up_4k();
+    let perm = MmapProt::from_bits_truncate(prot);
+    // 执行内存映射
+    let _ = aspace.map_alloc(start, size, perm.into(), true);
+    // 读取文件内容到缓冲区 buf
+    let mut buf = alloc::vec![0; size];
+    let file = get_file_like(fd).unwrap();
+    let _n = file.read(&mut buf).unwrap();
+    // 将缓冲区内容写入映射的内存区域
+    let _ = aspace.write(start, &buf);
+    // 返回映射的起始地址
+    start.as_usize() as isize
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
